@@ -103,7 +103,8 @@ fn run(cli: Cli) -> xurl_core::Result<()> {
         }
 
         let is_subagent_drilldown = match uri.provider {
-            xurl_core::ProviderKind::Codex
+            xurl_core::ProviderKind::Antigravity
+            | xurl_core::ProviderKind::Codex
             | xurl_core::ProviderKind::Copilot
             | xurl_core::ProviderKind::Claude
             | xurl_core::ProviderKind::Amp
@@ -377,7 +378,16 @@ impl WriteEventSink for CliWriteSink {
 
 const ISSUE_CREATE_URL: &str = "https://github.com/Xuanwo/xurl/issues/new";
 const SUPPORTED_PROVIDERS: &[&str] = &[
-    "amp", "copilot", "codex", "claude", "cursor", "gemini", "kimi", "pi", "opencode",
+    "amp",
+    "antigravity",
+    "copilot",
+    "codex",
+    "claude",
+    "cursor",
+    "gemini",
+    "kimi",
+    "pi",
+    "opencode",
 ];
 
 #[derive(Default)]
@@ -467,8 +477,8 @@ fn expected_session_id_shape(provider: Option<&str>) -> Option<&'static str> {
     match provider {
         Some("amp") => Some("T-<uuid>"),
         Some("opencode") => Some("ses_<id>"),
-        Some("codex") | Some("copilot") | Some("claude") | Some("cursor") | Some("gemini")
-        | Some("kimi") | Some("pi") => Some("<uuid>"),
+        Some("antigravity") | Some("agy") | Some("codex") | Some("copilot") | Some("claude")
+        | Some("cursor") | Some("gemini") | Some("kimi") | Some("pi") => Some("<uuid>"),
         _ => None,
     }
 }
@@ -478,6 +488,10 @@ fn provider_root_check(provider: &str) -> Option<String> {
         "amp" => {
             Some("verify XDG_DATA_HOME/amp or ~/.local/share/amp contains this thread".to_string())
         }
+        "antigravity" | "agy" => Some(
+            "verify ANTIGRAVITY_CLI_HOME, GEMINI_CLI_HOME/.gemini/antigravity-cli, or ~/.gemini/antigravity-cli contains this thread"
+                .to_string(),
+        ),
         "copilot" => Some("verify COPILOT_HOME or ~/.copilot contains this thread".to_string()),
         "codex" => Some("verify CODEX_HOME or ~/.codex contains this thread".to_string()),
         "claude" => Some("verify CLAUDE_CONFIG_DIR or ~/.claude contains this thread".to_string()),
@@ -511,6 +525,19 @@ fn provider_command_steps(command: &str, failed: bool) -> Vec<String> {
                 vec![
                     "run `amp --version`".to_string(),
                     "install Amp CLI if missing, then run `amp login`".to_string(),
+                ]
+            }
+        }
+        "agy" | "antigravity" => {
+            if failed {
+                vec![
+                    "verify authentication with `agy auth status` or `agy auth login`".to_string(),
+                    "retry the equivalent `agy -p ... --output-format stream-json` command directly once".to_string(),
+                ]
+            } else {
+                vec![
+                    "run `agy --version`".to_string(),
+                    "install Antigravity CLI (`agy`) if missing, then authenticate with `agy auth login`".to_string(),
                 ]
             }
         }

@@ -103,6 +103,9 @@ fn extract_timeline_entries(
     if provider == ProviderKind::Amp {
         return Ok(messages_to_entries(extract_amp_messages(path, raw_jsonl)?));
     }
+    if provider == ProviderKind::Antigravity {
+        return extract_antigravity_entries(path, raw_jsonl);
+    }
     if provider == ProviderKind::Copilot {
         return Ok(messages_to_entries(extract_copilot_messages(
             path, raw_jsonl,
@@ -134,7 +137,7 @@ fn extract_timeline_entries(
         };
 
         let extracted = match provider {
-            ProviderKind::Amp => None,
+            ProviderKind::Amp | ProviderKind::Antigravity => None,
             ProviderKind::Copilot => extract_copilot_entry(&value),
             ProviderKind::Codex => extract_codex_entry(&value),
             ProviderKind::Claude => extract_claude_entry(&value),
@@ -155,6 +158,198 @@ fn extract_timeline_entries(
 
 fn messages_to_entries(messages: Vec<ThreadMessage>) -> Vec<TimelineEntry> {
     messages.into_iter().map(TimelineEntry::Message).collect()
+}
+
+fn extract_antigravity_entries(path: &Path, raw_jsonl: &str) -> Result<Vec<TimelineEntry>> {
+    let mut entries = Vec::new();
+    let mut parent_sender_id = None::<String>;
+
+    for (line_idx, line) in raw_jsonl.lines().enumerate() {
+        let line_no = line_idx + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Some(value) = jsonl::parse_json_line(path, line_no, trimmed)? else {
+            continue;
+        };
+
+        let Some(step_type) = value.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+
+        match step_type {
+            "USER_INPUT" => {
+                if let Some(content) = value.get("content").and_then(Value::as_str)
+                    && let Some(text) = extract_antigravity_user_request(content)
+                {
+                    entries.push(TimelineEntry::Message(ThreadMessage {
+                        role: MessageRole::User,
+                        text,
+                    }));
+                }
+            }
+            "SYSTEM_MESSAGE" => {
+                if let Some(content) = value.get("content").and_then(Value::as_str)
+                    && let Some((sender, body)) = parse_antigravity_system_message(content)
+                    && crate::uri::is_uuid_session_id(&sender)
+                    && !body.is_empty()
+                {
+                    if parent_sender_id.is_none()
+                        && entries.is_empty()
+                        && value.get("step_index").and_then(Value::as_u64).unwrap_or(0) == 0
+                    {
+                        parent_sender_id = Some(sender.to_ascii_lowercase());
+                    }
+                    if parent_sender_id
+                        .as_deref()
+                        .is_some_and(|parent| parent.eq_ignore_ascii_case(&sender))
+                    {
+                        entries.push(TimelineEntry::Message(ThreadMessage {
+                            role: MessageRole::User,
+                            text: body,
+                        }));
+                    }
+                }
+            }
+            "PLANNER_RESPONSE" => {
+                let content_text = value
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty());
+                let send_msg_text =
+                    extract_antigravity_send_message(&value, parent_sender_id.as_deref());
+                let assistant_text = match (content_text, send_msg_text) {
+                    (Some(c), Some(m)) if c != m => Some(format!("{c}\n\n{m}")),
+                    (Some(c), _) => Some(c.to_string()),
+                    (None, Some(m)) => Some(m),
+                    (None, None) => None,
+                };
+                if let Some(text) = assistant_text {
+                    entries.push(TimelineEntry::Message(ThreadMessage {
+                        role: MessageRole::Assistant,
+                        text,
+                    }));
+                }
+            }
+            "CHECKPOINT" => {
+                let summary = value
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(ToString::to_string);
+                entries.push(TimelineEntry::Compact { summary });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(entries)
+}
+
+fn extract_antigravity_user_request(content: &str) -> Option<String> {
+    if let Some((_, after_open)) = content.split_once("<USER_REQUEST>")
+        && let Some((inner, _)) = after_open.split_once("</USER_REQUEST>")
+    {
+        let trimmed = inner.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let without_meta = content
+        .split("<ADDITIONAL_METADATA>")
+        .next()
+        .unwrap_or(content)
+        .split("<USER_SETTINGS_CHANGE>")
+        .next()
+        .unwrap_or(content)
+        .trim();
+    if without_meta.is_empty() {
+        None
+    } else {
+        Some(without_meta.to_string())
+    }
+}
+
+pub(crate) fn unquote_json_string_arg(raw: &str) -> String {
+    if raw.starts_with('"') {
+        serde_json::from_str::<String>(raw).unwrap_or_else(|_| raw.to_string())
+    } else {
+        raw.to_string()
+    }
+}
+
+pub(crate) fn parse_antigravity_system_message(content: &str) -> Option<(String, String)> {
+    let without_preamble = content
+        .trim()
+        .strip_prefix(
+            "The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.",
+        )
+        .unwrap_or(content)
+        .trim();
+    let inner = if let Some((_, after_open)) = without_preamble.split_once("<SYSTEM_MESSAGE>") {
+        after_open
+            .rsplit_once("</SYSTEM_MESSAGE>")
+            .map_or(after_open, |(inside, _)| inside)
+            .trim()
+    } else {
+        without_preamble
+    };
+    let message_body = inner.strip_prefix("[Message]")?.trim();
+    let sender_idx = message_body.find("sender=")?;
+    let after_sender = &message_body[sender_idx + "sender=".len()..];
+    let sender_end = after_sender.find(char::is_whitespace)?;
+    let sender = after_sender[..sender_end].trim().to_string();
+
+    let content_marker = "content=";
+    let content_idx = after_sender.find(content_marker)?;
+    let text = after_sender[content_idx + content_marker.len()..]
+        .trim()
+        .to_string();
+    Some((sender, text))
+}
+
+fn extract_antigravity_send_message(
+    value: &Value,
+    expected_recipient: Option<&str>,
+) -> Option<String> {
+    let expected_recipient = expected_recipient?;
+    for call in value
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if call.get("name").and_then(Value::as_str) != Some("send_message") {
+            continue;
+        }
+        let args = call.get("args");
+        if let Some(recipient_raw) = args
+            .and_then(|a| a.get("Recipient").or_else(|| a.get("recipient")))
+            .and_then(Value::as_str)
+        {
+            let recipient = unquote_json_string_arg(recipient_raw);
+            if !recipient.eq_ignore_ascii_case(expected_recipient) {
+                continue;
+            }
+        }
+        let Some(raw_msg) = args
+            .and_then(|a| a.get("Message").or_else(|| a.get("message")))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let decoded = unquote_json_string_arg(raw_msg);
+        let trimmed = decoded.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 fn extract_pi_entries(
@@ -939,5 +1134,71 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].text, "hello");
         assert_eq!(messages[1].text, "reasoning\n\ndone");
+    }
+
+    #[test]
+    fn antigravity_extracts_user_request_planner_response_and_checkpoint() {
+        let raw = r##"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-04-06T03:07:38.587966376Z","content":"<USER_REQUEST>\ninspect antigravity support\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-04-06\n</ADDITIONAL_METADATA>"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-04-06T03:07:40Z","thinking":"thinking...","tool_calls":[{"id":"1","name":"read_file","args":{"Path":"/tmp/a"}}]}
+{"step_index":2,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-04-06T03:07:41Z","content":"# Resuming from a compaction\nSummary of work"}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-04-06T03:07:42Z","content":"Antigravity support is ready."}"##;
+
+        let uri = AgentsUri::parse("agents://antigravity/7f636947-513f-4eef-b737-c3be296f6b48")
+            .expect("parse uri");
+        let output = render_markdown(&uri, Path::new("/tmp/mock"), raw).expect("render");
+
+        assert!(output.contains("## 1. User"));
+        assert!(output.contains("inspect antigravity support"));
+        assert!(!output.contains("ADDITIONAL_METADATA"));
+        assert!(output.contains("## 2. Context Compacted"));
+        assert!(output.contains("# Resuming from a compaction"));
+        assert!(output.contains("## 3. Assistant"));
+        assert!(output.contains("Antigravity support is ready."));
+    }
+
+    #[test]
+    fn antigravity_subagent_extracts_system_prompt_and_send_message_fallback() {
+        let raw = r#"{"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-04-06T03:08:30Z","content":"<SYSTEM_MESSAGE>\n[Message] timestamp=2026-04-06T03:08:30Z sender=7f636947-513f-4eef-b737-c3be296f6b48 priority=NORMAL content=Audit the module and reply.\n</SYSTEM_MESSAGE>"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-04-06T03:08:40Z","tool_calls":[{"id":"call_1","name":"send_message","args":{"Message":"\"Audit complete: no issues found.\"","Recipient":"\"7f636947-513f-4eef-b737-c3be296f6b48\""}}]}"#;
+
+        let messages = extract_messages(ProviderKind::Antigravity, Path::new("/tmp/mock"), raw)
+            .expect("extract");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "Audit the module and reply.");
+        assert_eq!(messages[1].text, "Audit complete: no issues found.");
+    }
+
+    #[test]
+    fn antigravity_system_message_with_trailing_metadata_parses_cleanly() {
+        let raw = r#"{"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-04-06T03:08:30Z","content":"The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important information to pay attention to.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-04-06T03:08:30Z sender=7f636947-513f-4eef-b737-c3be296f6b48 priority=NORMAL content=Audit the module.\n</SYSTEM_MESSAGE>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-04-06\n</ADDITIONAL_METADATA>"}"#;
+
+        let messages = extract_messages(ProviderKind::Antigravity, Path::new("/tmp/mock"), raw)
+            .expect("extract");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "Audit the module.");
+    }
+
+    #[test]
+    fn antigravity_subagent_multi_turn_preserves_chronological_order() {
+        let raw = r##"{"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-04-06T03:08:30Z","content":"<SYSTEM_MESSAGE>\n[Message] timestamp=2026-04-06T03:08:30Z sender=7f636947-513f-4eef-b737-c3be296f6b48 priority=NORMAL content=First task.\n</SYSTEM_MESSAGE>"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-04-06T03:08:40Z","content":"Sending report.","tool_calls":[{"id":"call_1","name":"send_message","args":{"Message":"\"Turn 1 report.\"","Recipient":"\"7f636947-513f-4eef-b737-c3be296f6b48\""}}]}
+{"step_index":2,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-04-06T03:08:50Z","content":"# Compacted"}
+{"step_index":3,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-04-06T03:09:00Z","content":"<SYSTEM_MESSAGE>\n[Message] timestamp=2026-04-06T03:09:00Z sender=7f636947-513f-4eef-b737-c3be296f6b48 priority=NORMAL content=Second task.\n</SYSTEM_MESSAGE>"}
+{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-04-06T03:09:10Z","content":"Turn 2 final answer."}"##;
+
+        let uri = AgentsUri::parse("agents://antigravity/37fa3489-df9f-4e82-9234-43963c27d1c6")
+            .expect("parse uri");
+        let output = render_markdown(&uri, Path::new("/tmp/mock"), raw).expect("render");
+
+        let idx1 = output.find("First task.").expect("turn 1 user");
+        let idx2 = output
+            .find("Sending report.\n\nTurn 1 report.")
+            .expect("turn 1 assistant");
+        let idx3 = output.find("## 3. Context Compacted").expect("checkpoint");
+        let idx4 = output.find("Second task.").expect("turn 2 user");
+        let idx5 = output
+            .find("Turn 2 final answer.")
+            .expect("turn 2 assistant");
+        assert!(idx1 < idx2 && idx2 < idx3 && idx3 < idx4 && idx4 < idx5);
     }
 }

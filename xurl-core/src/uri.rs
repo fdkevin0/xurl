@@ -129,6 +129,7 @@ fn parse_legacy_target<'a>(scheme: &str, target: &'a str, input: &str) -> Result
     let provider = parse_provider(scheme)?;
     let normalized_target = match provider {
         ProviderKind::Amp => target,
+        ProviderKind::Antigravity => target,
         ProviderKind::Copilot => target,
         ProviderKind::Codex => target.strip_prefix("threads/").unwrap_or(target),
         ProviderKind::Claude
@@ -186,7 +187,8 @@ impl FromStr for AgentsUri {
             ProviderKind::Amp if !AMP_SESSION_ID_RE.is_match(raw_id) => {
                 return Err(XurlError::InvalidSessionId(raw_id.to_string()));
             }
-            ProviderKind::Codex
+            ProviderKind::Antigravity
+            | ProviderKind::Codex
             | ProviderKind::Copilot
             | ProviderKind::Claude
             | ProviderKind::Cursor
@@ -212,7 +214,8 @@ impl FromStr for AgentsUri {
 
         let session_id = match provider {
             ProviderKind::Amp => format!("T-{}", raw_id[2..].to_ascii_lowercase()),
-            ProviderKind::Codex
+            ProviderKind::Antigravity
+            | ProviderKind::Codex
             | ProviderKind::Copilot
             | ProviderKind::Claude
             | ProviderKind::Cursor
@@ -225,7 +228,8 @@ impl FromStr for AgentsUri {
         let agent_id = raw_agent_id.map(|agent_id| {
             if provider == ProviderKind::Amp && AMP_SESSION_ID_RE.is_match(&agent_id) {
                 format!("T-{}", agent_id[2..].to_ascii_lowercase())
-            } else if ((provider == ProviderKind::Codex
+            } else if ((provider == ProviderKind::Antigravity
+                || provider == ProviderKind::Codex
                 || provider == ProviderKind::Copilot
                 || provider == ProviderKind::Gemini)
                 && SESSION_ID_RE.is_match(&agent_id))
@@ -336,6 +340,7 @@ fn hex_value(ch: u8) -> Option<u8> {
 fn parse_provider(scheme: &str) -> Result<ProviderKind> {
     match scheme {
         "amp" => Ok(ProviderKind::Amp),
+        "antigravity" | "agy" => Ok(ProviderKind::Antigravity),
         "copilot" => Ok(ProviderKind::Copilot),
         "codex" => Ok(ProviderKind::Codex),
         "claude" => Ok(ProviderKind::Claude),
@@ -351,7 +356,8 @@ fn parse_provider(scheme: &str) -> Result<ProviderKind> {
 fn looks_like_session_id(provider: ProviderKind, token: &str) -> bool {
     match provider {
         ProviderKind::Amp => AMP_SESSION_ID_RE.is_match(token),
-        ProviderKind::Codex
+        ProviderKind::Antigravity
+        | ProviderKind::Codex
         | ProviderKind::Copilot
         | ProviderKind::Claude
         | ProviderKind::Cursor
@@ -1191,5 +1197,29 @@ mod tests {
     fn parse_role_query_uri_returns_none_for_collection() {
         let query = parse_role_query_uri("agents://codex").expect("parse must succeed");
         assert_eq!(query, None);
+    }
+
+    #[test]
+    fn parse_valid_antigravity_and_agy_uri() {
+        let uri = AgentsUri::parse("agents://antigravity/29D207DB-CA7E-40BA-87F7-E14C9DE60613")
+            .expect("parse should succeed");
+        assert_eq!(uri.provider, ProviderKind::Antigravity);
+        assert_eq!(uri.session_id, "29d207db-ca7e-40ba-87f7-e14c9de60613");
+        assert_eq!(uri.agent_id, None);
+
+        let shorthand = AgentsUri::parse("agents://agy/29D207DB-CA7E-40BA-87F7-E14C9DE60613/2B112C8A-D80A-4CFF-9C8A-6F3E6FBAF7FB")
+            .expect("parse should succeed");
+        assert_eq!(shorthand.provider, ProviderKind::Antigravity);
+        assert_eq!(shorthand.session_id, "29d207db-ca7e-40ba-87f7-e14c9de60613");
+        assert_eq!(
+            shorthand.agent_id,
+            Some("2b112c8a-d80a-4cff-9c8a-6f3e6fbaf7fb".to_string())
+        );
+
+        let role = parse_role_uri("agents://agy/research")
+            .expect("parse role should succeed")
+            .expect("role must exist");
+        assert_eq!(role.provider, ProviderKind::Antigravity);
+        assert_eq!(role.role, "research");
     }
 }

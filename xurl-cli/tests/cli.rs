@@ -14,6 +14,8 @@ const REAL_FIXTURE_MAIN_ID: &str = "55fe4488-c6bd-46fa-9390-dab3b8860b95";
 const REAL_FIXTURE_AGENT_ID: &str = "29bf19c3-b83e-401d-8f38-5660b7f67152";
 const AMP_SESSION_ID: &str = "T-019c0797-c402-7389-bd80-d785c98df295";
 const AMP_SUBAGENT_ID: &str = "T-1abc0797-c402-7389-bd80-d785c98df295";
+const ANTIGRAVITY_REAL_MAIN_ID: &str = "7f636947-513f-4eef-b737-c3be296f6b48";
+const ANTIGRAVITY_REAL_SUBAGENT_ID: &str = "37fa3489-df9f-4e82-9234-43963c27d1c6";
 const COPILOT_REAL_SESSION_ID: &str = "688628a1-407a-4b4e-b24a-1a250ebf864f";
 const GEMINI_SESSION_ID: &str = "29d207db-ca7e-40ba-87f7-e14c9de60613";
 const GEMINI_CHILD_SESSION_ID: &str = "2b112c8a-d80a-4cff-9c8a-6f3e6fbaf7fb";
@@ -561,6 +563,18 @@ fn gemini_real_fixture_root() -> PathBuf {
 
 fn copilot_real_fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/copilot_real_sanitized")
+}
+
+fn antigravity_real_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/antigravity_real_sanitized")
+}
+
+fn antigravity_real_uri() -> String {
+    format!("agents://antigravity/{ANTIGRAVITY_REAL_MAIN_ID}")
+}
+
+fn antigravity_real_subagent_uri() -> String {
+    format!("agents://antigravity/{ANTIGRAVITY_REAL_MAIN_ID}/{ANTIGRAVITY_REAL_SUBAGENT_ID}")
 }
 
 fn opencode_real_fixture_root() -> PathBuf {
@@ -3088,4 +3102,270 @@ exit 7
 
     let written = fs::read_to_string(output).expect("read output");
     assert_eq!(written, "file target");
+}
+
+#[test]
+fn antigravity_real_fixture_outputs_markdown_and_supports_agy_shorthand() {
+    let fixture_root = antigravity_real_fixture_root();
+    assert!(fixture_root.exists(), "fixture root must exist");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    cmd.env("ANTIGRAVITY_CLI_HOME", &fixture_root)
+        .arg(antigravity_real_uri())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Thread"))
+        .stdout(predicate::str::contains("## 1. User"))
+        .stdout(predicate::str::contains("txt_user_001"))
+        .stdout(predicate::str::contains("txt_assistant_001"));
+
+    let mut agy_cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    agy_cmd
+        .env("ANTIGRAVITY_CLI_HOME", &fixture_root)
+        .arg(format!("agents://agy/{ANTIGRAVITY_REAL_MAIN_ID}"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "uri: 'agents://antigravity/{ANTIGRAVITY_REAL_MAIN_ID}'"
+        )))
+        .stdout(predicate::str::contains("txt_user_001"));
+}
+
+#[test]
+fn antigravity_real_fixture_head_includes_subagents_and_metadata() {
+    let fixture_root = antigravity_real_fixture_root();
+    assert!(fixture_root.exists(), "fixture root must exist");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    cmd.env("ANTIGRAVITY_CLI_HOME", &fixture_root)
+        .arg(antigravity_real_uri())
+        .arg("--head")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mode: 'subagent_index'"))
+        .stdout(predicate::str::contains("thread_metadata:"))
+        .stdout(predicate::str::contains("title = txt_title_001"))
+        .stdout(predicate::str::contains(
+            "workspace_uris[0] = file:///redacted/antigravity/project",
+        ))
+        .stdout(predicate::str::contains("subagents:"))
+        .stdout(predicate::str::contains(antigravity_real_subagent_uri()))
+        .stdout(predicate::str::contains("status: 'completed'"));
+}
+
+#[test]
+fn antigravity_real_fixture_subagent_detail_outputs_markdown() {
+    let fixture_root = antigravity_real_fixture_root();
+    assert!(fixture_root.exists(), "fixture root must exist");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    cmd.env("ANTIGRAVITY_CLI_HOME", &fixture_root)
+        .arg(antigravity_real_subagent_uri())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Subagent Thread"))
+        .stdout(predicate::str::contains(format!(
+            "- Main Thread: `{}`",
+            antigravity_real_uri()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "- Subagent Thread: `{}`",
+            antigravity_real_subagent_uri()
+        )))
+        .stdout(predicate::str::contains(
+            "- Status: `completed` (`child_rollout`)",
+        ))
+        .stdout(predicate::str::contains("- Relation: `validated`"))
+        .stdout(predicate::str::contains("invoke_subagent"))
+        .stdout(predicate::str::contains("txt_subagent_prompt_001"))
+        .stdout(predicate::str::contains("txt_child_assistant_001"));
+}
+
+#[test]
+fn antigravity_query_and_path_query_return_fixture_threads() {
+    let fixture_root = antigravity_real_fixture_root();
+    assert!(fixture_root.exists(), "fixture root must exist");
+
+    let mut query_cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    query_cmd
+        .env("ANTIGRAVITY_CLI_HOME", &fixture_root)
+        .arg("agents://agy?q=txt_assistant_001")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(antigravity_real_uri()))
+        .stdout(predicate::str::contains("txt_assistant_001"));
+
+    let mut path_cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    path_cmd
+        .env("ANTIGRAVITY_CLI_HOME", &fixture_root)
+        .arg("agents:///redacted/antigravity/project?providers=agy")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(antigravity_real_uri()))
+        .stdout(predicate::str::contains(format!(
+            "agents://antigravity/{ANTIGRAVITY_REAL_SUBAGENT_ID}"
+        )));
+}
+
+#[test]
+fn antigravity_path_query_inherits_parent_workspace_without_child_summary_row() {
+    let temp = tempdir().expect("tempdir");
+    let root = temp.path();
+    let parent_id = "11111111-1111-4111-8111-111111111111";
+    let child_id = "22222222-2222-4222-8222-222222222222";
+
+    let db_path = root.join("conversation_summaries.db");
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute_batch(
+        "CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            title TEXT,
+            step_count INTEGER,
+            last_modified_time TEXT,
+            workspace_uris TEXT,
+            status TEXT,
+            source TEXT,
+            agent_name TEXT,
+            parent_conversation_id TEXT,
+            killed INTEGER
+        );",
+    )
+    .expect("create table");
+    conn.execute(
+        "INSERT INTO conversation_summaries (
+            conversation_id, title, step_count, last_modified_time, workspace_uris,
+            status, source, agent_name, parent_conversation_id, killed
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            parent_id,
+            "Parent Title",
+            2_i64,
+            "2026-04-06T12:05:00Z",
+            r#"["file:///workspace/demo"]"#,
+            "CASCADE_RUN_STATUS_IDLE",
+            "cli",
+            "",
+            "",
+            0_i64,
+        ],
+    )
+    .expect("insert parent summary");
+
+    let parent_logs = root
+        .join("brain")
+        .join(parent_id)
+        .join(".system_generated/logs");
+    fs::create_dir_all(&parent_logs).expect("create parent logs");
+    fs::write(
+        parent_logs.join("transcript.jsonl"),
+        "{\"step_index\":0,\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-04-06T12:00:00Z\",\"content\":\"<USER_REQUEST>parent request</USER_REQUEST>\"}\n",
+    )
+    .expect("write parent transcript");
+
+    let child_logs = root
+        .join("brain")
+        .join(child_id)
+        .join(".system_generated/logs");
+    fs::create_dir_all(&child_logs).expect("create child logs");
+    fs::write(
+        child_logs.join("transcript.jsonl"),
+        format!(
+            "{{\"step_index\":0,\"type\":\"SYSTEM_MESSAGE\",\"status\":\"DONE\",\"created_at\":\"2026-04-06T12:01:00Z\",\"content\":\"<SYSTEM_MESSAGE>\\n[Message]\\nsender={parent_id}\\ncontent=child prompt\\n</SYSTEM_MESSAGE>\"}}\n"
+        ),
+    )
+    .expect("write child transcript");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    cmd.env("ANTIGRAVITY_CLI_HOME", root)
+        .arg("agents:///workspace/demo?providers=antigravity")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "agents://antigravity/{parent_id}"
+        )))
+        .stdout(predicate::str::contains(format!(
+            "agents://antigravity/{child_id}"
+        )));
+}
+
+#[cfg(unix)]
+#[test]
+fn write_antigravity_create_role_and_append_stream_json_work() {
+    let session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let mock = setup_mock_bins(&[(
+        "agy",
+        r#"
+if [ "$1" != "-p" ] || [ "$3" != "--output-format" ] || [ "$4" != "stream-json" ] || [ "$5" != "--dangerously-skip-permissions" ]; then
+  echo "unexpected args: $*" >&2
+  exit 7
+fi
+prompt="$2"
+shift 5
+seen_agent=""
+seen_conv=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent)
+      shift
+      seen_agent="$1"
+      ;;
+    --conversation)
+      shift
+      seen_conv="$1"
+      ;;
+  esac
+  shift
+done
+echo '{"event":"init","conversation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","model":"claude-opus-4-6"}'
+if [ -n "$seen_agent" ]; then
+  echo "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"step_index\":1,\"step_type\":\"agent_response\",\"status\":\"IN_PROGRESS\",\"text_delta\":\"agy role:$seen_agent\"}}"
+elif [ -n "$seen_conv" ]; then
+  echo "{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"$seen_conv\",\"step_index\":1,\"step_type\":\"agent_response\",\"status\":\"IN_PROGRESS\",\"text_delta\":\"agy append:$prompt\"}}"
+else
+  echo '{"event":"step_update","step_update":{"conversation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","step_index":1,"step_type":"agent_response","status":"IN_PROGRESS","text_delta":"hello from "}}'
+  echo '{"event":"step_update","step_update":{"conversation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","step_index":1,"step_type":"agent_response","status":"IN_PROGRESS","text_delta":"antigravity"}}'
+fi
+echo '{"event":"result","result":{"conversation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","status":"SUCCESS","response":"done"}}'
+"#,
+    )]);
+
+    let mut create_cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    create_cmd
+        .env("PATH", path_with_mock(mock.path()))
+        .arg("agents://agy")
+        .arg("-d")
+        .arg("hello")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from antigravity"))
+        .stderr(predicate::str::contains(format!(
+            "created: agents://antigravity/{session_id}"
+        )));
+
+    let mut role_cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    role_cmd
+        .env("PATH", path_with_mock(mock.path()))
+        .arg("agents://antigravity/research")
+        .arg("-d")
+        .arg("hello")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agy role:research"))
+        .stderr(predicate::str::contains(format!(
+            "created: agents://antigravity/{session_id}"
+        )));
+
+    let mut append_cmd = Command::new(assert_cmd::cargo::cargo_bin!("xurl"));
+    append_cmd
+        .env("PATH", path_with_mock(mock.path()))
+        .arg(format!("agents://antigravity/{session_id}"))
+        .arg("-d")
+        .arg("continue")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agy append:continue"))
+        .stderr(predicate::str::contains(format!(
+            "updated: agents://antigravity/{session_id}"
+        )));
 }

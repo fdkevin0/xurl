@@ -1,0 +1,7 @@
+{
+  "description": "Sanitized Antigravity CLI fixture generated from local real brain transcripts and conversation_summaries.db.",
+  "main_thread_id": "7f636947-513f-4eef-b737-c3be296f6b48",
+  "subagent_id": "37fa3489-df9f-4e82-9234-43963c27d1c6",
+  "main_path": "brain/7f636947-513f-4eef-b737-c3be296f6b48/.system_generated/logs/transcript_full.jsonl",
+  "subagent_path": "brain/37fa3489-df9f-4e82-9234-43963c27d1c6/.system_generated/logs/transcript_full.jsonl"
+}
