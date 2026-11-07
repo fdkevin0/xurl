@@ -22,6 +22,7 @@ use crate::model::{
     WriteResult,
 };
 use crate::provider::amp::AmpProvider;
+use crate::provider::antigravity::AntigravityProvider;
 use crate::provider::claude::ClaudeProvider;
 use crate::provider::codex::CodexProvider;
 use crate::provider::copilot::CopilotProvider;
@@ -170,6 +171,9 @@ pub fn resolve_thread(uri: &AgentsUri, roots: &ProviderRoots) -> Result<Resolved
     let session_id = uri.require_session_id()?;
     match uri.provider {
         ProviderKind::Amp => AmpProvider::new(&roots.amp_root).resolve(session_id),
+        ProviderKind::Antigravity => {
+            AntigravityProvider::new(&roots.antigravity_root).resolve(session_id)
+        }
         ProviderKind::Copilot => CopilotProvider::new(&roots.copilot_root).resolve(session_id),
         ProviderKind::Codex => CodexProvider::new(&roots.codex_root).resolve(session_id),
         ProviderKind::Claude => ClaudeProvider::new(&roots.claude_root).resolve(session_id),
@@ -189,6 +193,9 @@ pub fn write_thread(
 ) -> Result<WriteResult> {
     match provider {
         ProviderKind::Amp => AmpProvider::new(&roots.amp_root).write(req, sink),
+        ProviderKind::Antigravity => {
+            AntigravityProvider::new(&roots.antigravity_root).write(req, sink)
+        }
         ProviderKind::Copilot => CopilotProvider::new(&roots.copilot_root).write(req, sink),
         ProviderKind::Codex => CodexProvider::new(&roots.codex_root).write(req, sink),
         ProviderKind::Claude => ClaudeProvider::new(&roots.claude_root).write(req, sink),
@@ -227,6 +234,9 @@ pub fn query_threads(query: &ThreadQuery, roots: &ProviderRoots) -> Result<Threa
 
     let mut candidates = match query.provider {
         ProviderKind::Amp => collect_amp_query_candidates(roots, &mut warnings),
+        ProviderKind::Antigravity => {
+            collect_antigravity_query_candidates(roots, &mut warnings, false)
+        }
         ProviderKind::Copilot => collect_copilot_query_candidates(roots, &mut warnings),
         ProviderKind::Codex => collect_codex_query_candidates(roots, &mut warnings),
         ProviderKind::Claude => collect_claude_query_candidates(roots, &mut warnings),
@@ -641,6 +651,7 @@ pub fn render_thread_head_markdown(uri: &AgentsUri, roots: &ProviderRoots) -> Re
     match (uri.provider, uri.agent_id.as_deref()) {
         (
             ProviderKind::Amp
+            | ProviderKind::Antigravity
             | ProviderKind::Codex
             | ProviderKind::Claude
             | ProviderKind::Gemini
@@ -711,6 +722,7 @@ pub fn render_thread_head_markdown(uri: &AgentsUri, roots: &ProviderRoots) -> Re
         }
         (
             ProviderKind::Amp
+            | ProviderKind::Antigravity
             | ProviderKind::Copilot
             | ProviderKind::Codex
             | ProviderKind::Claude
@@ -850,6 +862,7 @@ pub fn resolve_subagent_view(
 
     match uri.provider {
         ProviderKind::Amp => resolve_amp_subagent_view(uri, roots, list),
+        ProviderKind::Antigravity => resolve_antigravity_subagent_view(uri, roots, list),
         ProviderKind::Copilot => Err(XurlError::UnsupportedSubagentProvider(
             ProviderKind::Copilot.to_string(),
         )),
@@ -956,6 +969,7 @@ fn collect_thread_metadata(provider: ProviderKind, path: &Path) -> (Vec<String>,
 
     match provider {
         ProviderKind::Amp => collect_amp_thread_metadata(path, &raw),
+        ProviderKind::Antigravity => collect_antigravity_thread_metadata(path, &raw),
         ProviderKind::Copilot => collect_copilot_thread_metadata(path, &raw),
         ProviderKind::Codex => collect_codex_thread_metadata(path, &raw),
         ProviderKind::Claude => collect_claude_thread_metadata(path, &raw),
@@ -969,6 +983,7 @@ fn collect_thread_metadata(provider: ProviderKind, path: &Path) -> (Vec<String>,
 
 fn collect_query_thread_metadata(provider: ProviderKind, path: &Path) -> Option<Vec<String>> {
     let metadata = match provider {
+        ProviderKind::Antigravity => collect_antigravity_query_thread_metadata(path),
         ProviderKind::Codex => {
             collect_query_jsonl_thread_metadata(path, |value, metadata, seen| {
                 match value.get("type").and_then(Value::as_str) {
@@ -1577,6 +1592,7 @@ fn format_thread_metadata_value(value: &Value) -> String {
 fn all_provider_kinds() -> Vec<ProviderKind> {
     vec![
         ProviderKind::Amp,
+        ProviderKind::Antigravity,
         ProviderKind::Copilot,
         ProviderKind::Codex,
         ProviderKind::Claude,
@@ -1600,6 +1616,9 @@ fn collect_candidates_for_provider(
 ) -> Result<Vec<QueryCandidate>> {
     match provider {
         ProviderKind::Amp => Ok(collect_amp_query_candidates(roots, warnings)),
+        ProviderKind::Antigravity => {
+            Ok(collect_antigravity_query_candidates(roots, warnings, true))
+        }
         ProviderKind::Copilot => Ok(collect_copilot_query_candidates(roots, warnings)),
         ProviderKind::Codex => Ok(collect_codex_query_candidates(roots, warnings)),
         ProviderKind::Claude => Ok(collect_claude_query_candidates(roots, warnings)),
@@ -4686,6 +4705,7 @@ fn extract_last_timestamp(raw: &str) -> Option<String> {
         };
         if let Some(timestamp) = value
             .get("timestamp")
+            .or_else(|| value.get("created_at"))
             .and_then(Value::as_str)
             .map(ToString::to_string)
         {
@@ -5405,6 +5425,900 @@ fn main_thread_uri(uri: &AgentsUri) -> AgentsUri {
         agent_id: None,
         query: Vec::new(),
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct AntigravitySummaryRow {
+    conversation_id: String,
+    title: Option<String>,
+    step_count: Option<i64>,
+    last_modified_time: Option<String>,
+    workspace_uris: Option<String>,
+    status: Option<String>,
+    source: Option<String>,
+    agent_name: Option<String>,
+    parent_conversation_id: Option<String>,
+    killed: Option<i64>,
+}
+
+fn antigravity_session_id_and_root_from_transcript_path(path: &Path) -> Option<(String, PathBuf)> {
+    let logs_dir = path.parent()?;
+    if logs_dir.file_name()?.to_str()? != "logs" {
+        return None;
+    }
+    let sys_dir = logs_dir.parent()?;
+    if sys_dir.file_name()?.to_str()? != ".system_generated" {
+        return None;
+    }
+    let session_dir = sys_dir.parent()?;
+    let session_id = session_dir.file_name()?.to_str()?.to_ascii_lowercase();
+    if !is_uuid_session_id(&session_id) {
+        return None;
+    }
+    let brain_dir = session_dir.parent()?;
+    if brain_dir.file_name()?.to_str()? != "brain" {
+        return None;
+    }
+    let antigravity_root = brain_dir.parent()?.to_path_buf();
+    Some((session_id, antigravity_root))
+}
+
+fn map_antigravity_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AntigravitySummaryRow> {
+    Ok(AntigravitySummaryRow {
+        conversation_id: row.get::<_, String>(0)?.to_ascii_lowercase(),
+        title: row.get::<_, Option<String>>(1)?,
+        step_count: row.get::<_, Option<i64>>(2)?,
+        last_modified_time: row.get::<_, Option<String>>(3)?,
+        workspace_uris: row.get::<_, Option<String>>(4)?,
+        status: row.get::<_, Option<String>>(5)?,
+        source: row.get::<_, Option<String>>(6)?,
+        agent_name: row.get::<_, Option<String>>(7)?,
+        parent_conversation_id: row
+            .get::<_, Option<String>>(8)?
+            .map(|id| id.trim().to_ascii_lowercase())
+            .filter(|id| !id.is_empty()),
+        killed: row.get::<_, Option<i64>>(9)?,
+    })
+}
+
+fn load_antigravity_summaries(root: &Path) -> BTreeMap<String, AntigravitySummaryRow> {
+    let db_path = root.join("conversation_summaries.db");
+    if !db_path.exists() {
+        return BTreeMap::new();
+    }
+    let Ok(conn) = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return BTreeMap::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT conversation_id, title, step_count, last_modified_time, workspace_uris,
+                status, source, agent_name, parent_conversation_id, killed
+         FROM conversation_summaries",
+    ) else {
+        return BTreeMap::new();
+    };
+    let Ok(rows) = stmt.query_map([], map_antigravity_summary_row) else {
+        return BTreeMap::new();
+    };
+
+    let mut map = BTreeMap::new();
+    for row in rows.flatten() {
+        map.insert(row.conversation_id.clone(), row);
+    }
+    map
+}
+
+fn load_antigravity_summary_row(root: &Path, session_id: &str) -> Option<AntigravitySummaryRow> {
+    let db_path = root.join("conversation_summaries.db");
+    if !db_path.exists() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT conversation_id, title, step_count, last_modified_time, workspace_uris,
+                    status, source, agent_name, parent_conversation_id, killed
+             FROM conversation_summaries
+             WHERE conversation_id = ?1 COLLATE NOCASE
+             LIMIT 1",
+        )
+        .ok()?;
+    stmt.query_row([session_id], map_antigravity_summary_row)
+        .ok()
+}
+
+fn parse_antigravity_workspace_scope_path(workspace_uris_raw: Option<&str>) -> Option<PathBuf> {
+    let raw = workspace_uris_raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = serde_json::from_str::<Value>(raw).ok()?;
+    let first_uri = parsed.as_array()?.first()?.as_str()?.trim();
+    let path_str = first_uri.strip_prefix("file://").unwrap_or(first_uri);
+    scope_path_from_str(path_str)
+}
+
+fn push_antigravity_summary_metadata(
+    row: &AntigravitySummaryRow,
+    metadata: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+) {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "conversation_id".to_string(),
+        Value::String(row.conversation_id.clone()),
+    );
+    if let Some(title) = row.title.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("title".to_string(), Value::String(title.to_string()));
+    }
+    if let Some(status) = row.status.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("status".to_string(), Value::String(status.to_string()));
+    }
+    if let Some(source) = row.source.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("source".to_string(), Value::String(source.to_string()));
+    }
+    if let Some(agent_name) = row.agent_name.as_deref().filter(|s| !s.is_empty()) {
+        map.insert(
+            "agent_name".to_string(),
+            Value::String(agent_name.to_string()),
+        );
+    }
+    if let Some(parent_id) = row
+        .parent_conversation_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        map.insert(
+            "parent_conversation_id".to_string(),
+            Value::String(parent_id.to_string()),
+        );
+    }
+    if let Some(step_count) = row.step_count {
+        map.insert("step_count".to_string(), Value::Number(step_count.into()));
+    }
+    if let Some(last_modified_time) = row.last_modified_time.as_deref().filter(|s| !s.is_empty()) {
+        map.insert(
+            "last_modified_time".to_string(),
+            Value::String(last_modified_time.to_string()),
+        );
+    }
+    if let Some(raw_uris) = row.workspace_uris.as_deref()
+        && let Ok(parsed) = serde_json::from_str::<Value>(raw_uris)
+    {
+        map.insert("workspace_uris".to_string(), parsed);
+    }
+    let _ = push_thread_metadata_record(metadata, seen, &Value::Object(map));
+}
+
+fn strip_antigravity_step_payload(value: &mut Value) {
+    if let Some(obj) = value.as_object_mut() {
+        for key in [
+            "content",
+            "thinking",
+            "tool_calls",
+            "media",
+            "truncated_fields",
+        ] {
+            obj.remove(key);
+        }
+    }
+}
+
+fn collect_antigravity_thread_metadata(path: &Path, raw: &str) -> (Vec<String>, Vec<String>) {
+    let mut metadata = Vec::new();
+    let mut warnings = Vec::new();
+    let mut seen = BTreeSet::<String>::new();
+
+    if let Some((session_id, root)) = antigravity_session_id_and_root_from_transcript_path(path)
+        && let Some(row) = load_antigravity_summary_row(&root, &session_id)
+    {
+        push_antigravity_summary_metadata(&row, &mut metadata, &mut seen);
+    }
+
+    if let Some((line_idx, first_line)) = raw
+        .lines()
+        .enumerate()
+        .find(|(_, line)| !line.trim().is_empty())
+    {
+        match serde_json::from_str::<Value>(first_line.trim()) {
+            Ok(mut value) => {
+                strip_antigravity_step_payload(&mut value);
+                let _ = push_thread_metadata_record(&mut metadata, &mut seen, &value);
+            }
+            Err(err) => {
+                warnings.push(format!(
+                    "failed parsing antigravity metadata line {} in {}: {err}",
+                    line_idx + 1,
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    (metadata, warnings)
+}
+
+fn collect_antigravity_query_thread_metadata(path: &Path) -> Vec<String> {
+    let mut metadata = Vec::new();
+    let mut seen = BTreeSet::<String>::new();
+
+    if let Some((session_id, root)) = antigravity_session_id_and_root_from_transcript_path(path)
+        && let Some(row) = load_antigravity_summary_row(&root, &session_id)
+    {
+        push_antigravity_summary_metadata(&row, &mut metadata, &mut seen);
+    }
+
+    let step_meta = collect_query_jsonl_thread_metadata(path, |mut value, metadata, seen| {
+        strip_antigravity_step_payload(&mut value);
+        push_thread_metadata_record(metadata, seen, &value)
+    });
+    for entry in step_meta {
+        if seen.insert(entry.clone()) {
+            metadata.push(entry);
+        }
+    }
+
+    metadata
+}
+
+fn collect_antigravity_query_candidates(
+    roots: &ProviderRoots,
+    warnings: &mut Vec<String>,
+    need_scope_path: bool,
+) -> Vec<QueryCandidate> {
+    let brain_root = roots.antigravity_root.join("brain");
+    if !brain_root.exists() {
+        return Vec::new();
+    }
+
+    let summaries = load_antigravity_summaries(&roots.antigravity_root);
+    let entries = match fs::read_dir(&brain_root) {
+        Ok(entries) => entries,
+        Err(err) => {
+            warnings.push(format!(
+                "failed reading antigravity brain directory {}: {err}",
+                brain_root.display()
+            ));
+            return Vec::new();
+        }
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries.filter_map(std::result::Result::ok) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if !is_uuid_session_id(&dir_name) {
+            continue;
+        }
+        let session_id = dir_name.to_ascii_lowercase();
+        let Some(transcript_path) =
+            AntigravityProvider::resolve_transcript_path(&brain_root, &session_id)
+        else {
+            continue;
+        };
+
+        let summary_row = summaries.get(&session_id);
+        let scope_path = if need_scope_path {
+            summary_row
+                .and_then(|row| {
+                    parse_antigravity_workspace_scope_path(row.workspace_uris.as_deref())
+                })
+                .or_else(|| {
+                    summary_row
+                        .and_then(|row| row.parent_conversation_id.as_deref())
+                        .and_then(|parent_id| summaries.get(parent_id))
+                        .and_then(|parent_row| {
+                            parse_antigravity_workspace_scope_path(
+                                parent_row.workspace_uris.as_deref(),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    antigravity_child_parent_id(&transcript_path)
+                        .and_then(|parent_id| summaries.get(&parent_id))
+                        .and_then(|parent_row| {
+                            parse_antigravity_workspace_scope_path(
+                                parent_row.workspace_uris.as_deref(),
+                            )
+                        })
+                })
+        } else {
+            None
+        };
+
+        let mut candidate = make_file_candidate(
+            ProviderKind::Antigravity,
+            session_id.clone(),
+            format!("agents://antigravity/{session_id}"),
+            transcript_path,
+            scope_path,
+        );
+        if let Some(last_modified) = summary_row
+            .and_then(|row| row.last_modified_time.as_deref())
+            .filter(|s| !s.is_empty())
+        {
+            candidate.updated_at = Some(last_modified.to_string());
+        }
+        candidates.push(candidate);
+    }
+
+    candidates
+}
+
+fn resolve_antigravity_subagent_view(
+    uri: &AgentsUri,
+    roots: &ProviderRoots,
+    list: bool,
+) -> Result<SubagentView> {
+    let main_uri = main_thread_uri(uri);
+    let resolved_main = resolve_thread(&main_uri, roots)?;
+    let main_raw = read_thread_raw(&resolved_main.path)?;
+
+    let mut warnings = resolved_main.metadata.warnings.clone();
+    let mut timelines = BTreeMap::<String, AgentTimeline>::new();
+    warnings.extend(parse_antigravity_parent_lifecycle(
+        &main_raw,
+        &mut timelines,
+    ));
+
+    if list {
+        let summaries = load_antigravity_summaries(&roots.antigravity_root);
+        for (child_id, row) in &summaries {
+            if row.parent_conversation_id.as_deref() == Some(uri.session_id.as_str()) {
+                let timeline = timelines.entry(child_id.clone()).or_default();
+                if timeline.last_update.is_none() {
+                    timeline.last_update = row.last_modified_time.clone();
+                }
+            }
+        }
+
+        discover_antigravity_children_from_brain(
+            &roots.antigravity_root,
+            &uri.session_id,
+            &mut timelines,
+        );
+
+        let mut agents = Vec::new();
+        for (agent_id, timeline) in &timelines {
+            let (item, item_warnings) = build_antigravity_subagent_list_item(
+                agent_id,
+                &uri.session_id,
+                timeline,
+                summaries.get(agent_id),
+                roots,
+            );
+            warnings.extend(item_warnings);
+            agents.push(item);
+        }
+
+        return Ok(SubagentView::List(SubagentListView {
+            query: make_query(uri, None, true),
+            agents,
+            warnings,
+        }));
+    }
+
+    let agent_id = uri
+        .agent_id
+        .clone()
+        .ok_or_else(|| XurlError::InvalidMode("missing agent id".to_string()))?;
+    let summary_row = load_antigravity_summary_row(&roots.antigravity_root, &agent_id);
+
+    Ok(SubagentView::Detail(
+        build_antigravity_subagent_detail_view(
+            uri,
+            roots,
+            &agent_id,
+            &timelines,
+            summary_row.as_ref(),
+            warnings,
+        ),
+    ))
+}
+
+fn discover_antigravity_children_from_brain(
+    antigravity_root: &Path,
+    main_thread_id: &str,
+    timelines: &mut BTreeMap<String, AgentTimeline>,
+) {
+    let brain_root = antigravity_root.join("brain");
+    let Ok(entries) = fs::read_dir(&brain_root) else {
+        return;
+    };
+    for entry in entries.filter_map(std::result::Result::ok) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if !is_uuid_session_id(&dir_name) {
+            continue;
+        }
+        let child_id = dir_name.to_ascii_lowercase();
+        if child_id == main_thread_id || timelines.contains_key(&child_id) {
+            continue;
+        }
+        let Some(path) = AntigravityProvider::resolve_transcript_path(&brain_root, &child_id)
+        else {
+            continue;
+        };
+        if antigravity_child_parent_id(&path).is_some_and(|pid| pid == main_thread_id) {
+            timelines.entry(child_id).or_default();
+        }
+    }
+}
+
+fn antigravity_child_parent_id_from_raw(raw: &str) -> Option<String> {
+    let first_line = raw.lines().take(5).find(|line| !line.trim().is_empty())?;
+    let value = serde_json::from_str::<Value>(first_line.trim()).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("SYSTEM_MESSAGE") {
+        return None;
+    }
+    let (sender, _) = value
+        .get("content")
+        .and_then(Value::as_str)
+        .and_then(render::parse_antigravity_system_message)?;
+    if is_uuid_session_id(&sender) {
+        Some(sender.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn antigravity_child_parent_id(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let head = reader
+        .lines()
+        .take(5)
+        .filter_map(std::result::Result::ok)
+        .collect::<Vec<_>>()
+        .join("\n");
+    antigravity_child_parent_id_from_raw(&head)
+}
+
+fn parse_antigravity_parent_lifecycle(
+    raw: &str,
+    timelines: &mut BTreeMap<String, AgentTimeline>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut pending_spawns = Vec::<(Option<String>, String)>::new();
+    let mut parent_session_id = None::<String>;
+
+    for (line_idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value = match jsonl::parse_json_line(
+            Path::new("<antigravity:parent>"),
+            line_idx + 1,
+            trimmed,
+        ) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
+            Err(err) => {
+                warnings.push(format!(
+                    "failed to parse antigravity parent transcript line {}: {err}",
+                    line_idx + 1
+                ));
+                continue;
+            }
+        };
+
+        let timestamp = value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let Some(step_type) = value.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+
+        match step_type {
+            "PLANNER_RESPONSE" => {
+                for call in value
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(name) = call.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let args = call.get("args");
+                    match name {
+                        "invoke_subagent" => {
+                            let type_name = args
+                                .and_then(|a| a.get("TypeName"))
+                                .and_then(Value::as_str)
+                                .map(render::unquote_json_string_arg);
+                            let role = args
+                                .and_then(|a| a.get("Role"))
+                                .and_then(Value::as_str)
+                                .map(render::unquote_json_string_arg);
+                            let detail = match (type_name.as_deref(), role.as_deref()) {
+                                (Some(t), Some(r)) if !t.is_empty() && !r.is_empty() => {
+                                    format!("subagent spawned (type={t}, role={r})")
+                                }
+                                (Some(t), _) if !t.is_empty() => {
+                                    format!("subagent spawned (type={t})")
+                                }
+                                _ => "subagent spawned".to_string(),
+                            };
+                            pending_spawns.push((timestamp.clone(), detail));
+                        }
+                        "send_message" => {
+                            if let Some(recipient_raw) = args
+                                .and_then(|a| a.get("Recipient").or_else(|| a.get("recipient")))
+                                .and_then(Value::as_str)
+                            {
+                                let recipient = render::unquote_json_string_arg(recipient_raw)
+                                    .to_ascii_lowercase();
+                                if is_uuid_session_id(&recipient)
+                                    && parent_session_id.as_deref() != Some(recipient.as_str())
+                                {
+                                    let timeline = timelines.entry(recipient).or_default();
+                                    timeline.has_activity = true;
+                                    if timestamp.is_some() {
+                                        timeline.last_update = timestamp.clone();
+                                    }
+                                    timeline.events.push(SubagentLifecycleEvent {
+                                        timestamp: timestamp.clone(),
+                                        event: "send_message".to_string(),
+                                        detail: "message sent to subagent".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "GENERIC" => {
+                if !pending_spawns.is_empty()
+                    && let Some(content) = value.get("content").and_then(Value::as_str)
+                    && content.contains("Created the following subagent")
+                    && content.contains("conversationId")
+                {
+                    for child_id in extract_antigravity_conversation_ids(content) {
+                        let (spawn_ts, detail) = if !pending_spawns.is_empty() {
+                            pending_spawns.remove(0)
+                        } else {
+                            (timestamp.clone(), "subagent spawned".to_string())
+                        };
+                        let event_ts = timestamp.clone().or(spawn_ts);
+                        let timeline = timelines.entry(child_id).or_default();
+                        timeline.has_spawn = true;
+                        timeline.has_activity = true;
+                        if event_ts.is_some() {
+                            timeline.last_update = event_ts.clone();
+                        }
+                        timeline.events.push(SubagentLifecycleEvent {
+                            timestamp: event_ts,
+                            event: "invoke_subagent".to_string(),
+                            detail,
+                        });
+                    }
+                }
+            }
+            "SYSTEM_MESSAGE" => {
+                if let Some(content) = value.get("content").and_then(Value::as_str)
+                    && let Some((sender, _)) = render::parse_antigravity_system_message(content)
+                    && is_uuid_session_id(&sender)
+                {
+                    let sender_id = sender.to_ascii_lowercase();
+                    if value.get("step_index").and_then(Value::as_u64).unwrap_or(0) == 0
+                        && parent_session_id.is_none()
+                    {
+                        parent_session_id = Some(sender_id);
+                    } else if parent_session_id.as_deref() != Some(sender_id.as_str()) {
+                        let timeline = timelines.entry(sender_id).or_default();
+                        timeline.has_activity = true;
+                        if timestamp.is_some() {
+                            timeline.last_update = timestamp.clone();
+                        }
+                        timeline.states.push(STATUS_COMPLETED.to_string());
+                        timeline.events.push(SubagentLifecycleEvent {
+                            timestamp,
+                            event: "subagent_message".to_string(),
+                            detail: "subagent replied to parent".to_string(),
+                        });
+                    }
+                }
+            }
+            "CHECKPOINT" => {
+                if let Some(content) = value.get("content").and_then(Value::as_str)
+                    && content.contains("conversationId")
+                {
+                    for child_id in extract_antigravity_conversation_ids(content) {
+                        let timeline = timelines.entry(child_id).or_default();
+                        timeline.has_spawn = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    warnings
+}
+
+fn extract_antigravity_conversation_ids(text: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let marker = "\"conversationId\"";
+    let mut rest = text;
+    while let Some(idx) = rest.find(marker) {
+        rest = &rest[idx + marker.len()..];
+        let Some(colon_idx) = rest.find(':') else {
+            break;
+        };
+        rest = rest[colon_idx + 1..].trim_start();
+        let Some(after_quote) = rest.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end_quote) = after_quote.find('"') else {
+            break;
+        };
+        let candidate = &after_quote[..end_quote];
+        if is_uuid_session_id(candidate) {
+            let normalized = candidate.to_ascii_lowercase();
+            if !ids.contains(&normalized) {
+                ids.push(normalized);
+            }
+        }
+        rest = &after_quote[end_quote + 1..];
+    }
+    ids
+}
+
+struct AntigravityChildAnalysis {
+    resolved_path: PathBuf,
+    points_to_parent: bool,
+    thread: Option<SubagentThreadRef>,
+    status: Option<(String, String)>,
+    excerpt: Vec<SubagentExcerptMessage>,
+}
+
+fn build_antigravity_relation(
+    main_thread_id: &str,
+    timeline: &AgentTimeline,
+    summary_row: Option<&AntigravitySummaryRow>,
+    points_to_parent: bool,
+) -> SubagentRelation {
+    let mut relation = SubagentRelation::default();
+    if timeline.has_spawn {
+        relation.validated = true;
+        push_unique(
+            &mut relation.evidence,
+            "parent transcript contains invoke_subagent output".to_string(),
+        );
+    }
+    if summary_row
+        .and_then(|row| row.parent_conversation_id.as_deref())
+        .is_some_and(|parent_id| parent_id == main_thread_id)
+    {
+        relation.validated = true;
+        push_unique(
+            &mut relation.evidence,
+            "conversation_summaries.db parent_conversation_id matches main thread".to_string(),
+        );
+    }
+    if points_to_parent {
+        relation.validated = true;
+        push_unique(
+            &mut relation.evidence,
+            "child transcript step 0 SYSTEM_MESSAGE sender matches main thread".to_string(),
+        );
+    }
+    relation
+}
+
+fn analyze_antigravity_child(
+    agent_id: &str,
+    main_thread_id: &str,
+    summary_row: Option<&AntigravitySummaryRow>,
+    roots: &ProviderRoots,
+    include_excerpt: bool,
+    read_error_label: &str,
+    warnings: &mut Vec<String>,
+) -> Option<AntigravityChildAnalysis> {
+    let resolved_child = AntigravityProvider::new(&roots.antigravity_root)
+        .resolve(agent_id)
+        .ok()?;
+
+    match read_thread_raw(&resolved_child.path) {
+        Ok(child_raw) => {
+            let points_to_parent = antigravity_child_parent_id_from_raw(&child_raw)
+                .is_some_and(|pid| pid == main_thread_id);
+            let child_last_update = extract_last_timestamp(&child_raw)
+                .or_else(|| summary_row.and_then(|row| row.last_modified_time.clone()))
+                .or_else(|| modified_timestamp_string(&resolved_child.path));
+            let messages = render::extract_messages(
+                ProviderKind::Antigravity,
+                &resolved_child.path,
+                &child_raw,
+            )
+            .unwrap_or_default();
+            let status = Some(infer_antigravity_child_status(&messages, summary_row));
+            let excerpt = if include_excerpt {
+                messages
+                    .into_iter()
+                    .rev()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(|message| SubagentExcerptMessage {
+                        role: message.role,
+                        text: message.text,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let thread = Some(SubagentThreadRef {
+                thread_id: agent_id.to_string(),
+                path: Some(resolved_child.path.display().to_string()),
+                last_updated_at: child_last_update,
+            });
+            Some(AntigravityChildAnalysis {
+                resolved_path: resolved_child.path,
+                points_to_parent,
+                thread,
+                status,
+                excerpt,
+            })
+        }
+        Err(err) => {
+            let points_to_parent = antigravity_child_parent_id(&resolved_child.path)
+                .is_some_and(|pid| pid == main_thread_id);
+            warnings.push(format!(
+                "failed reading antigravity {read_error_label} for agent_id={agent_id}: {err}"
+            ));
+            Some(AntigravityChildAnalysis {
+                resolved_path: resolved_child.path,
+                points_to_parent,
+                thread: None,
+                status: None,
+                excerpt: Vec::new(),
+            })
+        }
+    }
+}
+
+fn build_antigravity_subagent_list_item(
+    agent_id: &str,
+    main_thread_id: &str,
+    timeline: &AgentTimeline,
+    summary_row: Option<&AntigravitySummaryRow>,
+    roots: &ProviderRoots,
+) -> (SubagentListItem, Vec<String>) {
+    let mut warnings = Vec::new();
+    let analysis = analyze_antigravity_child(
+        agent_id,
+        main_thread_id,
+        summary_row,
+        roots,
+        false,
+        "child transcript",
+        &mut warnings,
+    );
+    let points_to_parent = analysis.as_ref().is_some_and(|a| a.points_to_parent);
+    let relation =
+        build_antigravity_relation(main_thread_id, timeline, summary_row, points_to_parent);
+    let child_thread = analysis.as_ref().and_then(|a| a.thread.clone());
+    let last_update = timeline.last_update.clone().or_else(|| {
+        child_thread
+            .as_ref()
+            .and_then(|thread| thread.last_updated_at.clone())
+    });
+    let (status, status_source) = analysis
+        .and_then(|a| a.status)
+        .unwrap_or_else(|| infer_status_from_timeline(timeline, child_thread.is_some()));
+
+    (
+        SubagentListItem {
+            agent_id: agent_id.to_string(),
+            status,
+            status_source,
+            last_update,
+            relation,
+            child_thread,
+        },
+        warnings,
+    )
+}
+
+fn build_antigravity_subagent_detail_view(
+    uri: &AgentsUri,
+    roots: &ProviderRoots,
+    agent_id: &str,
+    timelines: &BTreeMap<String, AgentTimeline>,
+    summary_row: Option<&AntigravitySummaryRow>,
+    mut warnings: Vec<String>,
+) -> SubagentDetailView {
+    let timeline = timelines.get(agent_id).cloned().unwrap_or_default();
+    let analysis = analyze_antigravity_child(
+        agent_id,
+        &uri.session_id,
+        summary_row,
+        roots,
+        true,
+        "child thread",
+        &mut warnings,
+    );
+    let points_to_parent = analysis.as_ref().is_some_and(|a| a.points_to_parent);
+    let relation =
+        build_antigravity_relation(&uri.session_id, &timeline, summary_row, points_to_parent);
+
+    if let Some(ref resolved) = analysis {
+        if !relation.validated {
+            warnings.push(format!(
+                "child session file exists but no relation evidence links it to main_session_id={} (child path: {})",
+                uri.session_id,
+                resolved.resolved_path.display()
+            ));
+        }
+    } else if !relation.validated {
+        warnings.push(format!(
+            "child session not found for main_session_id={} agent_id={agent_id}",
+            uri.session_id
+        ));
+    }
+
+    let child_thread = analysis.as_ref().and_then(|a| a.thread.clone());
+    let excerpt = analysis
+        .as_ref()
+        .map(|a| a.excerpt.clone())
+        .unwrap_or_default();
+    let (status, status_source) = analysis
+        .and_then(|a| a.status)
+        .unwrap_or_else(|| infer_status_from_timeline(&timeline, child_thread.is_some()));
+
+    SubagentDetailView {
+        query: make_query(uri, Some(agent_id.to_string()), false),
+        relation,
+        lifecycle: timeline.events,
+        status,
+        status_source,
+        child_thread,
+        excerpt,
+        warnings,
+    }
+}
+
+fn infer_antigravity_child_status(
+    messages: &[crate::model::ThreadMessage],
+    summary_row: Option<&AntigravitySummaryRow>,
+) -> (String, String) {
+    if summary_row
+        .and_then(|row| row.killed)
+        .is_some_and(|killed| killed != 0)
+    {
+        return (
+            STATUS_SHUTDOWN.to_string(),
+            "conversation_summaries".to_string(),
+        );
+    }
+    if summary_row
+        .and_then(|row| row.status.as_deref())
+        .is_some_and(|status| status == "CASCADE_RUN_STATUS_RUNNING")
+    {
+        return (
+            STATUS_RUNNING.to_string(),
+            "conversation_summaries".to_string(),
+        );
+    }
+    if messages
+        .last()
+        .is_some_and(|m| m.role == crate::model::MessageRole::Assistant)
+    {
+        return (STATUS_COMPLETED.to_string(), "child_rollout".to_string());
+    }
+    if !messages.is_empty() {
+        return (STATUS_RUNNING.to_string(), "child_rollout".to_string());
+    }
+    (STATUS_PENDING_INIT.to_string(), "child_rollout".to_string())
 }
 
 fn make_query(uri: &AgentsUri, agent_id: Option<String>, list: bool) -> SubagentQuery {
