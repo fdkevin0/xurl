@@ -26,7 +26,7 @@ Trigger this skill when the user's intent involves **any** AI agent conversation
 - "Compare what different agents suggested"
 - "Check if I've discussed X before across agents"
 
-`[agent]` can be any AI coding agent name (e.g. codex, claude, copilot, cursor, etc.). xurl supports a growing list of providers — just try it. If a provider is not yet supported, xurl will return a clear error.
+`[agent]` can be any AI coding agent name (e.g. antigravity/agy, codex, claude, copilot, cursor, etc.). xurl supports a growing list of providers — just try it. If a provider is not yet supported, xurl will return a clear error.
 
 ## When NOT to Use
 
